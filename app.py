@@ -79,36 +79,55 @@ def test_ojs_submission(submission_id: int, x_api_key: str = Header(None)):
     if x_api_key != API_SECRET:
         raise HTTPException(status_code=401, detail="Unauthorized")
 
-    headers = {
-        "Authorization": f"Bearer {os.getenv('OJS_API_TOKEN')}"
-    }
-
+    token = os.getenv("OJS_API_TOKEN")
     base = os.getenv("OJS_BASE_URL")
+
+    auth_variants = {
+
+        "Bearer": {
+            "Authorization": f"Bearer {token}",
+            "Accept": "application/json"
+        },
+
+        "Plain": {
+            "Authorization": token,
+            "Accept": "application/json"
+        },
+
+        "ApiToken": {
+            "apiToken": token,
+            "Accept": "application/json"
+        }
+    }
 
     urls = [
         f"{base}/api/v1/submissions/{submission_id}",
-        f"{base}/api/v1/_submissions/{submission_id}",
         f"{base}/api/v1/submissions"
     ]
 
     results = {}
 
-    for url in urls:
-        try:
-            response = requests.get(
-                url,
-                headers=headers,
-                timeout=20
-            )
+    for auth_name, headers in auth_variants.items():
 
-            results[url] = {
-                "status_code": response.status_code,
-                "text_preview": response.text[:500]
-            }
+        results[auth_name] = {}
 
-        except Exception as e:
-            results[url] = {
-                "error": str(e)
-            }
+        for url in urls:
+
+            try:
+                response = requests.get(
+                    url,
+                    headers=headers,
+                    timeout=20
+                )
+
+                results[auth_name][url] = {
+                    "status_code": response.status_code,
+                    "text_preview": response.text[:300]
+                }
+
+            except Exception as e:
+                results[auth_name][url] = {
+                    "error": str(e)
+                }
 
     return results
