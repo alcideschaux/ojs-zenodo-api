@@ -72,3 +72,43 @@ def create_draft(payload: DraftRequest, x_api_key: str = Header(None)):
         "doi": data["metadata"].get("prereserve_doi", {}).get("doi"),
         "url": data["links"]["html"]
     }
+
+@app.get("/ojs/test-submission/{submission_id}")
+def test_ojs_submission(submission_id: int, x_api_key: str = Header(None)):
+
+    if x_api_key != API_SECRET:
+        raise HTTPException(status_code=401, detail="Unauthorized")
+
+    headers = {
+        "Authorization": f"Bearer {os.getenv('OJS_API_TOKEN')}"
+    }
+
+    base = os.getenv("OJS_BASE_URL")
+
+    urls = [
+        f"{base}/api/v1/submissions/{submission_id}",
+        f"{base}/api/v1/_submissions/{submission_id}",
+        f"{base}/api/v1/submissions"
+    ]
+
+    results = {}
+
+    for url in urls:
+        try:
+            response = requests.get(
+                url,
+                headers=headers,
+                timeout=20
+            )
+
+            results[url] = {
+                "status_code": response.status_code,
+                "text_preview": response.text[:500]
+            }
+
+        except Exception as e:
+            results[url] = {
+                "error": str(e)
+            }
+
+    return results
