@@ -1,12 +1,23 @@
 import os
 import requests
+import tempfile
 
 from typing import List, Optional
 
-from fastapi import FastAPI, Header, HTTPException
+from fastapi import (
+    FastAPI,
+    Header,
+    HTTPException,
+    UploadFile,
+    File,
+    Form
+)
+
 from pydantic import BaseModel
 
+
 app = FastAPI(title="OJS-Zenodo Bridge")
+
 
 API_SECRET = os.getenv("API_SECRET")
 
@@ -23,8 +34,11 @@ ZENODO_BASE_URL = os.getenv(
 # =========================
 
 class Author(BaseModel):
+
     name: str
+
     affiliation: Optional[str] = None
+
     orcid: Optional[str] = None
 
 
@@ -171,7 +185,94 @@ def create_zenodo_draft(
             {}
         ).get("doi"),
 
+        "bucket_url": data["links"]["bucket"],
+
         "url": data["links"]["html"]
+    }
+
+
+# =========================
+# UPLOAD PDF FILE
+# =========================
+
+@app.post("/zenodo/upload-file")
+async def upload_file_to_zenodo(
+
+    zenodo_id: str = Form(...),
+
+    file: UploadFile = File(...),
+
+    x_api_key: str = Header(None)
+
+):
+
+    if x_api_key != API_SECRET:
+
+        raise HTTPException(
+            status_code=401,
+            detail="Unauthorized"
+        )
+
+    headers = {
+        "Authorization": f"Bearer {ZENODO_TOKEN}"
+    }
+
+    # Obtener deposition actual
+    deposition_response = requests.get(
+        f"{ZENODO_BASE_URL}/api/deposit/depositions/{zenodo_id}",
+        headers=headers
+    )
+
+    if deposition_response.status_code >= 400:
+
+        raise HTTPException(
+            status_code=deposition_response.status_code,
+            detail=deposition_response.text
+        )
+
+    deposition_data = deposition_response.json()
+
+    bucket_url = deposition_data["links"]["bucket"]
+
+    # Guardar temporalmente
+    suffix = os.path.splitext(file.filename)[1]
+
+    with tempfile.NamedTemporaryFile(
+        delete=False,
+        suffix=suffix
+    ) as tmp:
+
+        content = await file.read()
+
+        tmp.write(content)
+
+        temp_path = tmp.name
+
+    # Upload a Zenodo bucket
+    with open(temp_path, "rb") as fp:
+
+        upload_response = requests.put(
+            f"{bucket_url}/{file.filename}",
+            data=fp,
+            headers=headers
+        )
+
+    os.remove(temp_path)
+
+    if upload_response.status_code >= 400:
+
+        raise HTTPException(
+            status_code=upload_response.status_code,
+            detail=upload_response.text
+        )
+
+    return {
+
+        "status": "file_uploaded",
+
+        "zenodo_id": zenodo_id,
+
+        "filename": file.filename
     }
 
 
