@@ -1,53 +1,147 @@
 import os
 import requests
+
+from typing import List, Optional
+
 from fastapi import FastAPI, Header, HTTPException
 from pydantic import BaseModel
 
 app = FastAPI(title="OJS-Zenodo Bridge")
 
 API_SECRET = os.getenv("API_SECRET")
-ZENODO_TOKEN = os.getenv("ZENODO_TOKEN")
-ZENODO_BASE_URL = os.getenv("ZENODO_BASE_URL", "https://zenodo.org")
 
-class DraftRequest(BaseModel):
-    article_id: int
+ZENODO_TOKEN = os.getenv("ZENODO_TOKEN")
+
+ZENODO_BASE_URL = os.getenv(
+    "ZENODO_BASE_URL",
+    "https://zenodo.org"
+)
+
+
+# =========================
+# MODELOS
+# =========================
+
+class Author(BaseModel):
+    name: str
+    affiliation: Optional[str] = None
+    orcid: Optional[str] = None
+
+
+class ZenodoDraftRequest(BaseModel):
+
+    title: str
+
+    abstract: str
+
+    doi: str
+
+    authors: List[Author]
+
+    keywords: Optional[List[str]] = []
+
+    language: Optional[str] = "spa"
+
+
+# =========================
+# HEALTH
+# =========================
 
 @app.get("/")
 def root():
-    return {"message": "OJS-Zenodo API running"}
+
+    return {
+        "message": "OJS-Zenodo API running"
+    }
+
 
 @app.get("/health")
 def health():
-    return {"status": "ok"}
 
-@app.post("/zenodo/draft-from-ojs")
-def create_draft(payload: DraftRequest, x_api_key: str = Header(None)):
+    return {
+        "status": "ok"
+    }
+
+
+# =========================
+# CREATE ZENODO DRAFT
+# =========================
+
+@app.post("/zenodo/create-draft")
+def create_zenodo_draft(
+    payload: ZenodoDraftRequest,
+    x_api_key: str = Header(None)
+):
 
     if x_api_key != API_SECRET:
-        raise HTTPException(status_code=401, detail="Unauthorized")
+
+        raise HTTPException(
+            status_code=401,
+            detail="Unauthorized"
+        )
 
     headers = {
+
         "Authorization": f"Bearer {ZENODO_TOKEN}",
+
         "Content-Type": "application/json"
     }
 
+    creators = []
+
+    for author in payload.authors:
+
+        creator = {
+            "name": author.name
+        }
+
+        if author.affiliation:
+
+            creator["affiliation"] = author.affiliation
+
+        if author.orcid:
+
+            creator["orcid"] = author.orcid
+
+        creators.append(creator)
+
     metadata = {
+
         "metadata": {
-            "title": f"Draft test article {payload.article_id}",
+
+            "title": payload.title,
+
             "upload_type": "publication",
+
             "publication_type": "article",
-            "description": "Test draft generated from OJS-Zenodo bridge.",
-            "creators": [
-                {
-                    "name": "Chaux, Alcides"
-                }
-            ],
+
+            "description": payload.abstract,
+
+            "creators": creators,
+
+            "keywords": payload.keywords,
+
+            "language": payload.language,
+
+            "license": "cc-by-4.0",
+
             "communities": [
                 {
                     "identifier": "scripta_scientia"
                 }
             ],
-            "license": "cc-by-4.0"
+
+            "related_identifiers": [
+                {
+                    "relation": "isSupplementTo",
+
+                    "identifier": payload.doi,
+
+                    "scheme": "doi",
+
+                    "resource_type": "publication-article"
+                }
+            ]
         }
     }
 
@@ -58,6 +152,7 @@ def create_draft(payload: DraftRequest, x_api_key: str = Header(None)):
     )
 
     if response.status_code >= 400:
+
         raise HTTPException(
             status_code=response.status_code,
             detail=response.text
@@ -66,20 +161,130 @@ def create_draft(payload: DraftRequest, x_api_key: str = Header(None)):
     data = response.json()
 
     return {
+
         "status": "draft_created",
-        "article_id": payload.article_id,
+
         "zenodo_id": data["id"],
-        "doi": data["metadata"].get("prereserve_doi", {}).get("doi"),
+
+        "doi": data["metadata"].get(
+            "prereserve_doi",
+            {}
+        ).get("doi"),
+
         "url": data["links"]["html"]
     }
 
+
+# =========================
+# OJS USER DIAGNOSTICS
+# =========================
+
+@app.get("/ojs/test-user")
+def test_ojs_user(
+    x_api_key: str = Header(None)
+):
+
+    try:
+
+        if x_api_key != API_SECRET:
+
+            raise HTTPException(
+                status_code=401,
+                detail="Unauthorized"
+            )
+
+        token = os.getenv("OJS_API_TOKEN")
+
+        base = os.getenv("OJS_BASE_URL")
+
+        auth_variants = {
+
+            "Bearer": {
+                "Authorization": f"Bearer {token}",
+                "Accept": "application/json"
+            },
+
+            "Plain": {
+                "Authorization": token,
+                "Accept": "application/json"
+            },
+
+            "ApiToken": {
+                "apiToken": token,
+                "Accept": "application/json"
+            }
+        }
+
+        urls = [
+
+            f"{base}/api/v1/users",
+
+            f"{base}/api/v1/users/current",
+
+            f"{base}/api/v1/contexts"
+        ]
+
+        results = {}
+
+        for auth_name, headers in auth_variants.items():
+
+            results[auth_name] = {}
+
+            for url in urls:
+
+                try:
+
+                    response = requests.get(
+                        url,
+                        headers=headers,
+                        timeout=20
+                    )
+
+                    results[auth_name][url] = {
+
+                        "status_code": response.status_code,
+
+                        "headers": dict(response.headers),
+
+                        "text_preview": str(
+                            response.text
+                        )[:500]
+                    }
+
+                except Exception as e:
+
+                    results[auth_name][url] = {
+                        "error": str(e)
+                    }
+
+        return results
+
+    except Exception as e:
+
+        return {
+            "fatal_error": str(e)
+        }
+
+
+# =========================
+# OJS SUBMISSION DIAGNOSTICS
+# =========================
+
 @app.get("/ojs/test-submission/{submission_id}")
-def test_ojs_submission(submission_id: int, x_api_key: str = Header(None)):
+def test_ojs_submission(
+    submission_id: int,
+    x_api_key: str = Header(None)
+):
 
     if x_api_key != API_SECRET:
-        raise HTTPException(status_code=401, detail="Unauthorized")
+
+        raise HTTPException(
+            status_code=401,
+            detail="Unauthorized"
+        )
 
     token = os.getenv("OJS_API_TOKEN")
+
     base = os.getenv("OJS_BASE_URL")
 
     auth_variants = {
@@ -101,7 +306,9 @@ def test_ojs_submission(submission_id: int, x_api_key: str = Header(None)):
     }
 
     urls = [
+
         f"{base}/api/v1/submissions/{submission_id}",
+
         f"{base}/api/v1/submissions"
     ]
 
@@ -114,6 +321,7 @@ def test_ojs_submission(submission_id: int, x_api_key: str = Header(None)):
         for url in urls:
 
             try:
+
                 response = requests.get(
                     url,
                     headers=headers,
@@ -121,71 +329,14 @@ def test_ojs_submission(submission_id: int, x_api_key: str = Header(None)):
                 )
 
                 results[auth_name][url] = {
+
                     "status_code": response.status_code,
+
                     "text_preview": response.text[:300]
                 }
 
             except Exception as e:
-                results[auth_name][url] = {
-                    "error": str(e)
-                }
 
-    return results
-
-@app.get("/ojs/test-user")
-def test_ojs_user(x_api_key: str = Header(None)):
-
-    if x_api_key != API_SECRET:
-        raise HTTPException(status_code=401, detail="Unauthorized")
-
-    token = os.getenv("OJS_API_TOKEN")
-    base = os.getenv("OJS_BASE_URL")
-
-    auth_variants = {
-
-        "Bearer": {
-            "Authorization": f"Bearer {token}",
-            "Accept": "application/json"
-        },
-
-        "Plain": {
-            "Authorization": token,
-            "Accept": "application/json"
-        },
-
-        "ApiToken": {
-            "apiToken": token,
-            "Accept": "application/json"
-        }
-    }
-
-    urls = [
-        f"{base}/api/v1/users",
-        f"{base}/api/v1/users/current",
-        f"{base}/api/v1/contexts"
-    ]
-
-    results = {}
-
-    for auth_name, headers in auth_variants.items():
-
-        results[auth_name] = {}
-
-        for url in urls:
-
-            try:
-                response = requests.get(
-                    url,
-                    headers=headers,
-                    timeout=20
-                )
-
-                results[auth_name][url] = {
-                    "status_code": response.status_code,
-                    "text_preview": response.text[:500]
-                }
-
-            except Exception as e:
                 results[auth_name][url] = {
                     "error": str(e)
                 }
