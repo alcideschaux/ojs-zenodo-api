@@ -280,19 +280,14 @@ def auto_deposit(
     publisher = "ChauxLab Institute"
 
     # ===================================
-    # CLEAN PDF FILENAME
+    # DOI-BASED PDF FILENAME
     # ===================================
 
-    safe_title = title.lower()
+    safe_doi = payload.doi.replace("/", "_")
 
-    safe_title = safe_title.replace(" ", "_")
+    safe_doi = safe_doi.replace(".", "_")
 
-    safe_title = "".join(
-        c for c in safe_title
-        if c.isalnum() or c in ["_", "-"]
-    )
-
-    original_filename = f"{safe_title}.pdf"
+    original_filename = f"{safe_doi}.pdf"
 
     # ===================================
     # AUTHORS
@@ -367,10 +362,12 @@ def auto_deposit(
 
             "journal_pages": pages,
 
+            "publication_date": publication_date,
+
             "notes": (
-                f"Published in {journal_title}. "
-                f"ISSN: {issn}. "
-                f"Publication date: {publication_date}."
+                f"{journal_title} "
+                f"(ISSN: {issn}) — "
+                f"Published: {publication_date}."
             ),
 
             "communities": [
@@ -439,13 +436,7 @@ def auto_deposit(
     # TEMP FILE
     # ===================================
 
-    suffix = os.path.splitext(
-        original_filename
-    )[1]
-
-    if not suffix:
-
-        suffix = ".pdf"
+    suffix = ".pdf"
 
     with tempfile.NamedTemporaryFile(
         delete=False,
@@ -510,6 +501,8 @@ def auto_deposit(
         "journal_issue": issue,
 
         "journal_pages": pages,
+
+        "publication_date": publication_date,
 
         "publisher": publisher,
 
