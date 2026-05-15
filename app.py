@@ -2,6 +2,8 @@ import os
 import requests
 import tempfile
 
+from bs4 import BeautifulSoup
+
 from typing import List, Optional
 
 from fastapi import (
@@ -39,37 +41,44 @@ class Author(BaseModel):
     orcid: Optional[str] = None
 
 
-class ZenodoDraftRequest(BaseModel):
-
-    title: str
-
-    abstract: str
-
-    doi: str
-
-    authors: List[Author]
-
-    keywords: Optional[List[str]] = []
-
-    language: Optional[str] = "spa"
-
-
-class UploadFromUrlRequest(BaseModel):
-
-    zenodo_id: str
-
-    pdf_url: str
-
-    filename: Optional[str] = "article.pdf"
-
-
 class AutoDepositRequest(BaseModel):
 
     doi: str
 
-    pdf_url: str
+    article_url: str
 
     filename: Optional[str] = "article.pdf"
+
+
+# =========================
+# HELPERS
+# =========================
+
+def extract_meta(soup, name):
+
+    tag = soup.find(
+        "meta",
+        attrs={"name": name}
+    )
+
+    if tag:
+
+        return tag.get("content", "")
+
+    return ""
+
+
+def extract_all_meta(soup, name):
+
+    tags = soup.find_all(
+        "meta",
+        attrs={"name": name}
+    )
+
+    return [
+        tag.get("content", "")
+        for tag in tags
+    ]
 
 
 # =========================
@@ -93,12 +102,12 @@ def health():
 
 
 # =========================
-# CREATE ZENODO DRAFT
+# FULL AUTO DEPOSIT
 # =========================
 
-@app.post("/zenodo/create-draft")
-def create_zenodo_draft(
-    payload: ZenodoDraftRequest,
+@app.post("/zenodo/auto-deposit")
+def auto_deposit(
+    payload: AutoDepositRequest,
     x_api_key: str = Header(None)
 ):
 
@@ -109,6 +118,148 @@ def create_zenodo_draft(
             detail="Unauthorized"
         )
 
+    # ===================================
+    # CROSSREF
+    # ===================================
+
+    crossref_response = requests.get(
+        f"https://api.crossref.org/works/{payload.doi}",
+        timeout=60
+    )
+
+    if crossref_response.status_code >= 400:
+
+        raise HTTPException(
+            status_code=404,
+            detail="DOI not found in Crossref"
+        )
+
+    crossref_data = crossref_response.json()["message"]
+
+    # ===================================
+    # OJS LANDING PAGE
+    # ===================================
+
+    article_response = requests.get(
+        payload.article_url,
+        timeout=60
+    )
+
+    if article_response.status_code >= 400:
+
+        raise HTTPException(
+            status_code=404,
+            detail="Could not access article URL"
+        )
+
+    soup = BeautifulSoup(
+        article_response.text,
+        "html.parser"
+    )
+
+    # ===================================
+    # METADATA
+    # ===================================
+
+    title = extract_meta(
+        soup,
+        "citation_title"
+    )
+
+    if not title:
+
+        title = crossref_data.get(
+            "title",
+            ["Untitled"]
+        )[0]
+
+    abstract = extract_meta(
+        soup,
+        "description"
+    )
+
+    keywords = extract_all_meta(
+        soup,
+        "citation_keywords"
+    )
+
+    language = extract_meta(
+        soup,
+        "citation_language"
+    )
+
+    if not language:
+
+        language = "spa"
+
+    journal_title = extract_meta(
+        soup,
+        "citation_journal_title"
+    )
+
+    volume = extract_meta(
+        soup,
+        "citation_volume"
+    )
+
+    issue = extract_meta(
+        soup,
+        "citation_issue"
+    )
+
+    publication_date = extract_meta(
+        soup,
+        "citation_publication_date"
+    )
+
+    pdf_url = extract_meta(
+        soup,
+        "citation_pdf_url"
+    )
+
+    issn = extract_meta(
+        soup,
+        "citation_issn"
+    )
+
+    publisher = "ChauxLab Institute"
+
+    # ===================================
+    # AUTHORS
+    # ===================================
+
+    authors = []
+
+    for author in crossref_data.get("author", []):
+
+        given = author.get("given", "")
+
+        family = author.get("family", "")
+
+        full_name = f"{family}, {given}".strip(", ")
+
+        affiliation = ""
+
+        if author.get("affiliation"):
+
+            affiliation = author["affiliation"][0].get(
+                "name",
+                ""
+            )
+
+        authors.append({
+
+            "name": full_name,
+
+            "affiliation": affiliation,
+
+            "orcid": author.get("ORCID", "")
+        })
+
+    # ===================================
+    # CREATE ZENODO DRAFT
+    # ===================================
+
     headers = {
 
         "Authorization": f"Bearer {ZENODO_TOKEN}",
@@ -116,43 +267,39 @@ def create_zenodo_draft(
         "Content-Type": "application/json"
     }
 
-    creators = []
-
-    for author in payload.authors:
-
-        creator = {
-            "name": author.name
-        }
-
-        if author.affiliation:
-
-            creator["affiliation"] = author.affiliation
-
-        if author.orcid:
-
-            creator["orcid"] = author.orcid
-
-        creators.append(creator)
-
     metadata = {
 
         "metadata": {
 
-            "title": payload.title,
+            "title": title,
 
             "upload_type": "publication",
 
             "publication_type": "article",
 
-            "description": payload.abstract,
+            "description": abstract,
 
-            "creators": creators,
+            "creators": authors,
 
-            "keywords": payload.keywords,
+            "keywords": keywords,
 
-            "language": payload.language,
+            "language": language,
 
             "license": "cc-by-4.0",
+
+            "publisher": publisher,
+
+            "journal_title": journal_title,
+
+            "journal_volume": volume,
+
+            "journal_issue": issue,
+
+            "notes": (
+                f"Published in {journal_title}. "
+                f"ISSN: {issn}. "
+                f"Publication date: {publication_date}."
+            ),
 
             "communities": [
                 {
@@ -174,84 +321,42 @@ def create_zenodo_draft(
         }
     }
 
-    response = requests.post(
+    draft_response = requests.post(
         f"{ZENODO_BASE_URL}/api/deposit/depositions",
         json=metadata,
         headers=headers
     )
 
-    if response.status_code >= 400:
+    if draft_response.status_code >= 400:
 
         raise HTTPException(
-            status_code=response.status_code,
-            detail=response.text
+            status_code=draft_response.status_code,
+            detail=draft_response.text
         )
 
-    data = response.json()
+    draft_data = draft_response.json()
 
-    return {
+    zenodo_id = draft_data["id"]
 
-        "status": "draft_created",
+    bucket_url = draft_data["links"]["bucket"]
 
-        "zenodo_id": data["id"],
+    # ===================================
+    # PDF UPLOAD
+    # ===================================
 
-        "doi": data["metadata"].get(
-            "prereserve_doi",
-            {}
-        ).get("doi"),
+    if not pdf_url:
 
-        "bucket_url": data["links"]["bucket"],
-
-        "url": data["links"]["html"]
-    }
-
-
-# =========================
-# UPLOAD PDF FROM URL
-# =========================
-
-@app.post("/zenodo/upload-from-url")
-def upload_from_url(
-    payload: UploadFromUrlRequest,
-    x_api_key: str = Header(None)
-):
-
-    if x_api_key != API_SECRET:
-
-        raise HTTPException(
-            status_code=401,
-            detail="Unauthorized"
-        )
-
-    headers = {
-        "Authorization": f"Bearer {ZENODO_TOKEN}"
-    }
-
-    deposition_response = requests.get(
-        f"{ZENODO_BASE_URL}/api/deposit/depositions/{payload.zenodo_id}",
-        headers=headers
-    )
-
-    if deposition_response.status_code >= 400:
-
-        raise HTTPException(
-            status_code=deposition_response.status_code,
-            detail=deposition_response.text
-        )
-
-    deposition_data = deposition_response.json()
-
-    bucket_url = deposition_data["links"]["bucket"]
+        pdf_url = payload.article_url
 
     pdf_response = requests.get(
-        payload.pdf_url,
+        pdf_url,
         timeout=60
     )
 
     if pdf_response.status_code >= 400:
 
         raise HTTPException(
-            status_code=pdf_response.status_code,
+            status_code=404,
             detail="Could not download PDF"
         )
 
@@ -283,147 +388,22 @@ def upload_from_url(
 
     return {
 
-        "status": "file_uploaded",
-
-        "zenodo_id": payload.zenodo_id,
-
-        "filename": payload.filename
-    }
-
-
-# =========================
-# FULL AUTO DEPOSIT
-# =========================
-
-@app.post("/zenodo/auto-deposit")
-def auto_deposit(
-    payload: AutoDepositRequest,
-    x_api_key: str = Header(None)
-):
-
-    if x_api_key != API_SECRET:
-
-        raise HTTPException(
-            status_code=401,
-            detail="Unauthorized"
-        )
-
-    # ===================================
-    # CROSSREF METADATA
-    # ===================================
-
-    crossref_response = requests.get(
-        f"https://api.crossref.org/works/{payload.doi}",
-        timeout=60
-    )
-
-    if crossref_response.status_code >= 400:
-
-        raise HTTPException(
-            status_code=404,
-            detail="DOI not found in Crossref"
-        )
-
-    crossref_data = crossref_response.json()["message"]
-
-    title = crossref_data.get(
-        "title",
-        ["Untitled"]
-    )[0]
-
-    abstract = crossref_data.get(
-        "abstract",
-        ""
-    )
-
-    language = crossref_data.get(
-        "language",
-        "eng"
-    )
-
-    keywords = crossref_data.get(
-        "subject",
-        []
-    )
-
-    authors = []
-
-    for author in crossref_data.get("author", []):
-
-        given = author.get("given", "")
-
-        family = author.get("family", "")
-
-        full_name = f"{family}, {given}".strip(", ")
-
-        affiliation = ""
-
-        if author.get("affiliation"):
-
-            affiliation = author["affiliation"][0].get(
-                "name",
-                ""
-            )
-
-        authors.append({
-            "name": full_name,
-            "affiliation": affiliation,
-            "orcid": author.get("ORCID", "")
-        })
-
-    # ===================================
-    # CREATE DRAFT
-    # ===================================
-
-    draft_payload = {
-
-        "title": title,
-
-        "abstract": abstract,
-
-        "doi": payload.doi,
-
-        "authors": authors,
-
-        "keywords": keywords,
-
-        "language": language
-    }
-
-    draft_response = create_zenodo_draft(
-        ZenodoDraftRequest(**draft_payload),
-        x_api_key
-    )
-
-    zenodo_id = draft_response["zenodo_id"]
-
-    # ===================================
-    # UPLOAD PDF
-    # ===================================
-
-    upload_payload = UploadFromUrlRequest(
-
-        zenodo_id=str(zenodo_id),
-
-        pdf_url=payload.pdf_url,
-
-        filename=payload.filename
-    )
-
-    upload_response = upload_from_url(
-        upload_payload,
-        x_api_key
-    )
-
-    return {
-
         "status": "auto_deposit_completed",
 
         "zenodo_id": zenodo_id,
 
-        "zenodo_doi": draft_response["doi"],
+        "zenodo_doi": draft_data["metadata"].get(
+            "prereserve_doi",
+            {}
+        ).get("doi"),
 
-        "zenodo_url": draft_response["url"],
+        "zenodo_url": draft_data["links"]["html"],
 
-        "upload_status": upload_response["status"]
+        "journal_title": journal_title,
+
+        "keywords": keywords,
+
+        "language": language,
+
+        "pdf_url": pdf_url
     }
