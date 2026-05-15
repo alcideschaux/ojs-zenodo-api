@@ -7,10 +7,7 @@ from typing import List, Optional
 from fastapi import (
     FastAPI,
     Header,
-    HTTPException,
-    UploadFile,
-    File,
-    Form
+    HTTPException
 )
 
 from pydantic import BaseModel
@@ -55,6 +52,15 @@ class ZenodoDraftRequest(BaseModel):
     keywords: Optional[List[str]] = []
 
     language: Optional[str] = "spa"
+
+
+class UploadFromUrlRequest(BaseModel):
+
+    zenodo_id: str
+
+    pdf_url: str
+
+    filename: Optional[str] = "article.pdf"
 
 
 # =========================
@@ -192,18 +198,13 @@ def create_zenodo_draft(
 
 
 # =========================
-# UPLOAD PDF FILE
+# UPLOAD PDF FROM URL
 # =========================
 
-@app.post("/zenodo/upload-file")
-async def upload_file_to_zenodo(
-
-    zenodo_id: str = Form(...),
-
-    file: UploadFile = File(...),
-
+@app.post("/zenodo/upload-from-url")
+def upload_from_url(
+    payload: UploadFromUrlRequest,
     x_api_key: str = Header(None)
-
 ):
 
     if x_api_key != API_SECRET:
@@ -217,9 +218,9 @@ async def upload_file_to_zenodo(
         "Authorization": f"Bearer {ZENODO_TOKEN}"
     }
 
-    # Obtener deposition actual
+    # Obtener deposition
     deposition_response = requests.get(
-        f"{ZENODO_BASE_URL}/api/deposit/depositions/{zenodo_id}",
+        f"{ZENODO_BASE_URL}/api/deposit/depositions/{payload.zenodo_id}",
         headers=headers
     )
 
@@ -234,25 +235,34 @@ async def upload_file_to_zenodo(
 
     bucket_url = deposition_data["links"]["bucket"]
 
-    # Guardar temporalmente
-    suffix = os.path.splitext(file.filename)[1]
+    # Descargar PDF remoto
+    pdf_response = requests.get(
+        payload.pdf_url,
+        timeout=60
+    )
 
+    if pdf_response.status_code >= 400:
+
+        raise HTTPException(
+            status_code=pdf_response.status_code,
+            detail="Could not download PDF"
+        )
+
+    # Guardar temporalmente
     with tempfile.NamedTemporaryFile(
         delete=False,
-        suffix=suffix
+        suffix=".pdf"
     ) as tmp:
 
-        content = await file.read()
-
-        tmp.write(content)
+        tmp.write(pdf_response.content)
 
         temp_path = tmp.name
 
-    # Upload a Zenodo bucket
+    # Upload a Zenodo
     with open(temp_path, "rb") as fp:
 
         upload_response = requests.put(
-            f"{bucket_url}/{file.filename}",
+            f"{bucket_url}/{payload.filename}",
             data=fp,
             headers=headers
         )
@@ -270,9 +280,9 @@ async def upload_file_to_zenodo(
 
         "status": "file_uploaded",
 
-        "zenodo_id": zenodo_id,
+        "zenodo_id": payload.zenodo_id,
 
-        "filename": file.filename
+        "filename": payload.filename
     }
 
 
