@@ -75,10 +75,17 @@ def extract_all_meta(soup, name):
         attrs={"name": name}
     )
 
-    return [
-        tag.get("content", "")
-        for tag in tags
-    ]
+    values = []
+
+    for tag in tags:
+
+        content = tag.get("content", "").strip()
+
+        if content:
+
+            values.append(content)
+
+    return values
 
 
 # =========================
@@ -110,6 +117,10 @@ def auto_deposit(
     payload: AutoDepositRequest,
     x_api_key: str = Header(None)
 ):
+
+    # ===================================
+    # AUTH
+    # ===================================
 
     if x_api_key != API_SECRET:
 
@@ -158,7 +169,7 @@ def auto_deposit(
     )
 
     # ===================================
-    # METADATA
+    # METADATA EXTRACTION
     # ===================================
 
     title = extract_meta(
@@ -177,6 +188,13 @@ def auto_deposit(
         soup,
         "description"
     )
+
+    if not abstract:
+
+        abstract = crossref_data.get(
+            "abstract",
+            ""
+        )
 
     keywords = extract_all_meta(
         soup,
@@ -341,7 +359,7 @@ def auto_deposit(
     bucket_url = draft_data["links"]["bucket"]
 
     # ===================================
-    # PDF UPLOAD
+    # PDF DOWNLOAD
     # ===================================
 
     if not pdf_url:
@@ -360,6 +378,10 @@ def auto_deposit(
             detail="Could not download PDF"
         )
 
+    # ===================================
+    # TEMP FILE
+    # ===================================
+
     with tempfile.NamedTemporaryFile(
         delete=False,
         suffix=".pdf"
@@ -369,12 +391,23 @@ def auto_deposit(
 
         temp_path = tmp.name
 
+    # ===================================
+    # ZENODO BUCKET UPLOAD
+    # ===================================
+
+    upload_headers = {
+
+        "Authorization": f"Bearer {ZENODO_TOKEN}",
+
+        "Content-Type": "application/octet-stream"
+    }
+
     with open(temp_path, "rb") as fp:
 
         upload_response = requests.put(
             f"{bucket_url}/{payload.filename}",
             data=fp,
-            headers=headers
+            headers=upload_headers
         )
 
     os.remove(temp_path)
@@ -385,6 +418,10 @@ def auto_deposit(
             status_code=upload_response.status_code,
             detail=upload_response.text
         )
+
+    # ===================================
+    # SUCCESS
+    # ===================================
 
     return {
 
