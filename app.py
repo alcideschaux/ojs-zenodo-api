@@ -334,6 +334,9 @@ def auto_deposit(
             "affiliation": affiliation,
 
             "orcid": orcid
+
+            "role": "Researcher"
+
         })
 
     # ===================================
