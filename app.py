@@ -290,35 +290,50 @@ def auto_deposit(
     original_filename = f"{safe_doi}.pdf"
 
     # ===================================
-    # AUTHORS
+    # AUTHORS + AFFILIATIONS
     # ===================================
 
     authors = []
 
-    for author in crossref_data.get("author", []):
+    ojs_authors = extract_all_meta(
+        soup,
+        "citation_author"
+    )
 
-        given = author.get("given", "")
+    ojs_affiliations = extract_all_meta(
+        soup,
+        "citation_author_institution"
+    )
 
-        family = author.get("family", "")
+    crossref_authors = crossref_data.get(
+        "author",
+        []
+    )
 
-        full_name = f"{family}, {given}".strip(", ")
+    for i, author_name in enumerate(ojs_authors):
 
         affiliation = ""
 
-        if author.get("affiliation"):
+        if i < len(ojs_affiliations):
 
-            affiliation = author["affiliation"][0].get(
-                "name",
+            affiliation = ojs_affiliations[i]
+
+        orcid = ""
+
+        if i < len(crossref_authors):
+
+            orcid = crossref_authors[i].get(
+                "ORCID",
                 ""
             )
 
         authors.append({
 
-            "name": full_name,
+            "name": author_name,
 
             "affiliation": affiliation,
 
-            "orcid": author.get("ORCID", "")
+            "orcid": orcid
         })
 
     # ===================================
@@ -512,5 +527,7 @@ def auto_deposit(
 
         "pdf_url": pdf_url,
 
-        "filename": original_filename
+        "filename": original_filename,
+
+        "authors": authors
     }
