@@ -47,8 +47,6 @@ class AutoDepositRequest(BaseModel):
 
     article_url: str
 
-    filename: Optional[str] = "article.pdf"
-
 
 # =========================
 # HELPERS
@@ -63,7 +61,7 @@ def extract_meta(soup, name):
 
     if tag:
 
-        return tag.get("content", "")
+        return tag.get("content", "").strip()
 
     return ""
 
@@ -240,7 +238,44 @@ def auto_deposit(
         "citation_issn"
     )
 
+    first_page = extract_meta(
+        soup,
+        "citation_firstpage"
+    )
+
+    last_page = extract_meta(
+        soup,
+        "citation_lastpage"
+    )
+
+    elocation_id = extract_meta(
+        soup,
+        "citation_id"
+    )
+
+    pages = ""
+
+    if first_page and last_page:
+
+        pages = f"{first_page}-{last_page}"
+
+    elif elocation_id:
+
+        pages = elocation_id
+
     publisher = "ChauxLab Institute"
+
+    # ===================================
+    # ORIGINAL PDF FILENAME
+    # ===================================
+
+    original_filename = "article.pdf"
+
+    if pdf_url:
+
+        original_filename = os.path.basename(
+            pdf_url.split("?")[0]
+        )
 
     # ===================================
     # AUTHORS
@@ -305,13 +340,17 @@ def auto_deposit(
 
             "license": "cc-by-4.0",
 
-            "publisher": publisher,
+            "imprint_publisher": publisher,
 
             "journal_title": journal_title,
 
             "journal_volume": volume,
 
             "journal_issue": issue,
+
+            "journal_pages": pages,
+
+            "journal_issn": issn,
 
             "notes": (
                 f"Published in {journal_title}. "
@@ -364,7 +403,10 @@ def auto_deposit(
 
     if not pdf_url:
 
-        pdf_url = payload.article_url
+        raise HTTPException(
+            status_code=404,
+            detail="PDF URL not found"
+        )
 
     pdf_response = requests.get(
         pdf_url,
@@ -382,9 +424,17 @@ def auto_deposit(
     # TEMP FILE
     # ===================================
 
+    suffix = os.path.splitext(
+        original_filename
+    )[1]
+
+    if not suffix:
+
+        suffix = ".pdf"
+
     with tempfile.NamedTemporaryFile(
         delete=False,
-        suffix=".pdf"
+        suffix=suffix
     ) as tmp:
 
         tmp.write(pdf_response.content)
@@ -405,7 +455,7 @@ def auto_deposit(
     with open(temp_path, "rb") as fp:
 
         upload_response = requests.put(
-            f"{bucket_url}/{payload.filename}",
+            f"{bucket_url}/{original_filename}",
             data=fp,
             headers=upload_headers
         )
@@ -438,9 +488,21 @@ def auto_deposit(
 
         "journal_title": journal_title,
 
+        "journal_issn": issn,
+
+        "journal_volume": volume,
+
+        "journal_issue": issue,
+
+        "journal_pages": pages,
+
+        "publisher": publisher,
+
         "keywords": keywords,
 
         "language": language,
 
-        "pdf_url": pdf_url
+        "pdf_url": pdf_url,
+
+        "filename": original_filename
     }
