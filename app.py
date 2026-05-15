@@ -63,6 +63,15 @@ class UploadFromUrlRequest(BaseModel):
     filename: Optional[str] = "article.pdf"
 
 
+class AutoDepositRequest(BaseModel):
+
+    doi: str
+
+    pdf_url: str
+
+    filename: Optional[str] = "article.pdf"
+
+
 # =========================
 # HEALTH
 # =========================
@@ -218,7 +227,6 @@ def upload_from_url(
         "Authorization": f"Bearer {ZENODO_TOKEN}"
     }
 
-    # Obtener deposition
     deposition_response = requests.get(
         f"{ZENODO_BASE_URL}/api/deposit/depositions/{payload.zenodo_id}",
         headers=headers
@@ -235,7 +243,6 @@ def upload_from_url(
 
     bucket_url = deposition_data["links"]["bucket"]
 
-    # Descargar PDF remoto
     pdf_response = requests.get(
         payload.pdf_url,
         timeout=60
@@ -248,7 +255,6 @@ def upload_from_url(
             detail="Could not download PDF"
         )
 
-    # Guardar temporalmente
     with tempfile.NamedTemporaryFile(
         delete=False,
         suffix=".pdf"
@@ -258,7 +264,6 @@ def upload_from_url(
 
         temp_path = tmp.name
 
-    # Upload a Zenodo
     with open(temp_path, "rb") as fp:
 
         upload_response = requests.put(
@@ -287,103 +292,12 @@ def upload_from_url(
 
 
 # =========================
-# OJS USER DIAGNOSTICS
+# FULL AUTO DEPOSIT
 # =========================
 
-@app.get("/ojs/test-user")
-def test_ojs_user(
-    x_api_key: str = Header(None)
-):
-
-    try:
-
-        if x_api_key != API_SECRET:
-
-            raise HTTPException(
-                status_code=401,
-                detail="Unauthorized"
-            )
-
-        token = os.getenv("OJS_API_TOKEN")
-
-        base = os.getenv("OJS_BASE_URL")
-
-        auth_variants = {
-
-            "Bearer": {
-                "Authorization": f"Bearer {token}",
-                "Accept": "application/json"
-            },
-
-            "Plain": {
-                "Authorization": token,
-                "Accept": "application/json"
-            },
-
-            "ApiToken": {
-                "apiToken": token,
-                "Accept": "application/json"
-            }
-        }
-
-        urls = [
-
-            f"{base}/api/v1/users",
-
-            f"{base}/api/v1/users/current",
-
-            f"{base}/api/v1/contexts"
-        ]
-
-        results = {}
-
-        for auth_name, headers in auth_variants.items():
-
-            results[auth_name] = {}
-
-            for url in urls:
-
-                try:
-
-                    response = requests.get(
-                        url,
-                        headers=headers,
-                        timeout=20
-                    )
-
-                    results[auth_name][url] = {
-
-                        "status_code": response.status_code,
-
-                        "headers": dict(response.headers),
-
-                        "text_preview": str(
-                            response.text
-                        )[:500]
-                    }
-
-                except Exception as e:
-
-                    results[auth_name][url] = {
-                        "error": str(e)
-                    }
-
-        return results
-
-    except Exception as e:
-
-        return {
-            "fatal_error": str(e)
-        }
-
-
-# =========================
-# OJS SUBMISSION DIAGNOSTICS
-# =========================
-
-@app.get("/ojs/test-submission/{submission_id}")
-def test_ojs_submission(
-    submission_id: int,
+@app.post("/zenodo/auto-deposit")
+def auto_deposit(
+    payload: AutoDepositRequest,
     x_api_key: str = Header(None)
 ):
 
@@ -394,62 +308,122 @@ def test_ojs_submission(
             detail="Unauthorized"
         )
 
-    token = os.getenv("OJS_API_TOKEN")
+    # ===================================
+    # CROSSREF METADATA
+    # ===================================
 
-    base = os.getenv("OJS_BASE_URL")
+    crossref_response = requests.get(
+        f"https://api.crossref.org/works/{payload.doi}",
+        timeout=60
+    )
 
-    auth_variants = {
+    if crossref_response.status_code >= 400:
 
-        "Bearer": {
-            "Authorization": f"Bearer {token}",
-            "Accept": "application/json"
-        },
+        raise HTTPException(
+            status_code=404,
+            detail="DOI not found in Crossref"
+        )
 
-        "Plain": {
-            "Authorization": token,
-            "Accept": "application/json"
-        },
+    crossref_data = crossref_response.json()["message"]
 
-        "ApiToken": {
-            "apiToken": token,
-            "Accept": "application/json"
-        }
+    title = crossref_data.get(
+        "title",
+        ["Untitled"]
+    )[0]
+
+    abstract = crossref_data.get(
+        "abstract",
+        ""
+    )
+
+    language = crossref_data.get(
+        "language",
+        "eng"
+    )
+
+    keywords = crossref_data.get(
+        "subject",
+        []
+    )
+
+    authors = []
+
+    for author in crossref_data.get("author", []):
+
+        given = author.get("given", "")
+
+        family = author.get("family", "")
+
+        full_name = f"{family}, {given}".strip(", ")
+
+        affiliation = ""
+
+        if author.get("affiliation"):
+
+            affiliation = author["affiliation"][0].get(
+                "name",
+                ""
+            )
+
+        authors.append({
+            "name": full_name,
+            "affiliation": affiliation,
+            "orcid": author.get("ORCID", "")
+        })
+
+    # ===================================
+    # CREATE DRAFT
+    # ===================================
+
+    draft_payload = {
+
+        "title": title,
+
+        "abstract": abstract,
+
+        "doi": payload.doi,
+
+        "authors": authors,
+
+        "keywords": keywords,
+
+        "language": language
     }
 
-    urls = [
+    draft_response = create_zenodo_draft(
+        ZenodoDraftRequest(**draft_payload),
+        x_api_key
+    )
 
-        f"{base}/api/v1/submissions/{submission_id}",
+    zenodo_id = draft_response["zenodo_id"]
 
-        f"{base}/api/v1/submissions"
-    ]
+    # ===================================
+    # UPLOAD PDF
+    # ===================================
 
-    results = {}
+    upload_payload = UploadFromUrlRequest(
 
-    for auth_name, headers in auth_variants.items():
+        zenodo_id=str(zenodo_id),
 
-        results[auth_name] = {}
+        pdf_url=payload.pdf_url,
 
-        for url in urls:
+        filename=payload.filename
+    )
 
-            try:
+    upload_response = upload_from_url(
+        upload_payload,
+        x_api_key
+    )
 
-                response = requests.get(
-                    url,
-                    headers=headers,
-                    timeout=20
-                )
+    return {
 
-                results[auth_name][url] = {
+        "status": "auto_deposit_completed",
 
-                    "status_code": response.status_code,
+        "zenodo_id": zenodo_id,
 
-                    "text_preview": response.text[:300]
-                }
+        "zenodo_doi": draft_response["doi"],
 
-            except Exception as e:
+        "zenodo_url": draft_response["url"],
 
-                results[auth_name][url] = {
-                    "error": str(e)
-                }
-
-    return results
+        "upload_status": upload_response["status"]
+    }
