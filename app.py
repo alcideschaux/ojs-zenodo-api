@@ -253,29 +253,46 @@ def auto_deposit(
         "citation_id"
     )
 
+    # ===================================
+    # PAGES / ELOCATOR
+    # ===================================
+
     pages = ""
 
     if first_page and last_page:
 
-        pages = f"{first_page}-{last_page}"
+        if first_page == last_page:
+
+            pages = first_page
+
+        else:
+
+            pages = f"{first_page}-{last_page}"
 
     elif elocation_id:
 
         pages = elocation_id
 
+    # ===================================
+    # PUBLISHER
+    # ===================================
+
     publisher = "ChauxLab Institute"
 
     # ===================================
-    # ORIGINAL PDF FILENAME
+    # CLEAN PDF FILENAME
     # ===================================
 
-    original_filename = "article.pdf"
+    safe_title = title.lower()
 
-    if pdf_url:
+    safe_title = safe_title.replace(" ", "_")
 
-        original_filename = os.path.basename(
-            pdf_url.split("?")[0]
-        )
+    safe_title = "".join(
+        c for c in safe_title
+        if c.isalnum() or c in ["_", "-"]
+    )
+
+    original_filename = f"{safe_title}.pdf"
 
     # ===================================
     # AUTHORS
@@ -349,8 +366,6 @@ def auto_deposit(
             "journal_issue": issue,
 
             "journal_pages": pages,
-
-            "journal_issn": issn,
 
             "notes": (
                 f"Published in {journal_title}. "
